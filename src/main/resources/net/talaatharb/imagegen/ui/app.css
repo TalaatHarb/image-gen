@@ -1,0 +1,33 @@
+.field-label {
+    -fx-font-weight: bold;
+}
+
+.muted {
+    -fx-text-fill: #666666;
+}
+
+.status-bar {
+    -fx-border-color: #d0d0d0 transparent transparent transparent;
+    -fx-background-color: #f4f4f4;
+}
+
+.button.primary {
+    -fx-base: #2563eb;
+    -fx-font-weight: bold;
+}
+
+.canvas {
+    -fx-background-color: #2b2b2b;
+}
+
+.canvas .label {
+    -fx-text-fill: #9a9a9a;
+}
+
+.history {
+    -fx-background-color: transparent;
+}
+
+.thumbnail {
+    -fx-cursor: hand;
+}

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.Button?>
+<?import javafx.scene.control.CheckBox?>
+<?import javafx.scene.control.ComboBox?>
+<?import javafx.scene.control.Label?>
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.control.Spinner?>
+<?import javafx.scene.control.SplitPane?>
+<?import javafx.scene.control.TextArea?>
+<?import javafx.scene.control.TextField?>
+<?import javafx.scene.image.ImageView?>
+<?import javafx.scene.layout.BorderPane?>
+<?import javafx.scene.layout.ColumnConstraints?>
+<?import javafx.scene.layout.GridPane?>
+<?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Region?>
+<?import javafx.scene.layout.StackPane?>
+<?import javafx.scene.layout.VBox?>
+
+<SplitPane xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml" dividerPositions="0.36"
+           fx:controller="net.talaatharb.imagegen.ui.ImageGenerationTabController">
+    <ScrollPane fitToWidth="true" minWidth="340">
+        <VBox spacing="10">
+            <padding><Insets top="12" right="12" bottom="12" left="12"/></padding>
+            <HBox spacing="8" alignment="CENTER_LEFT">
+                <Label text="Model:" styleClass="field-label"/>
+                <ComboBox fx:id="engineCombo" maxWidth="Infinity" HBox.hgrow="ALWAYS"/>
+                <Button text="Download" onAction="#onInstall"/>
+            </HBox>
+            <Label fx:id="modelStatus" styleClass="muted"/>
+            <Label fx:id="engineDescription" styleClass="muted" wrapText="true"/>
+            <Label text="Prompt" styleClass="field-label"/>
+            <TextArea fx:id="promptInput" wrapText="true" prefRowCount="5"
+                      text="A cozy cabin in a snowy pine forest at dusk, warm light in the windows, detailed, cinematic"/>
+            <Label text="Negative prompt" styleClass="field-label"/>
+            <TextArea fx:id="negativeInput" wrapText="true" prefRowCount="2"/>
+            <GridPane hgap="8" vgap="8">
+                <columnConstraints>
+                    <ColumnConstraints minWidth="80"/>
+                    <ColumnConstraints hgrow="ALWAYS"/>
+                </columnConstraints>
+                <Label text="Width:" styleClass="field-label" GridPane.rowIndex="0" GridPane.columnIndex="0"/>
+                <ComboBox fx:id="widthCombo" prefWidth="120" GridPane.rowIndex="0" GridPane.columnIndex="1"/>
+                <Label text="Height:" styleClass="field-label" GridPane.rowIndex="1" GridPane.columnIndex="0"/>
+                <ComboBox fx:id="heightCombo" prefWidth="120" GridPane.rowIndex="1" GridPane.columnIndex="1"/>
+                <Label text="Steps:" styleClass="field-label" GridPane.rowIndex="2" GridPane.columnIndex="0"/>
+                <Spinner fx:id="stepsSpinner" prefWidth="120" GridPane.rowIndex="2" GridPane.columnIndex="1"/>
+                <Label text="Guidance:" styleClass="field-label" GridPane.rowIndex="3" GridPane.columnIndex="0"/>
+                <Spinner fx:id="guidanceSpinner" prefWidth="120" GridPane.rowIndex="3" GridPane.columnIndex="1"/>
+                <Label text="Seed:" styleClass="field-label" GridPane.rowIndex="4" GridPane.columnIndex="0"/>
+                <HBox spacing="8" alignment="CENTER_LEFT" GridPane.rowIndex="4" GridPane.columnIndex="1">
+                    <TextField fx:id="seedField" prefWidth="120" text="42"/>
+                    <CheckBox fx:id="randomSeedCheck" text="Random" selected="true"/>
+                </HBox>
+            </GridPane>
+            <Button fx:id="generateButton" text="Generate" defaultButton="true" maxWidth="Infinity"
+                    onAction="#onGenerate" styleClass="primary"/>
+        </VBox>
+    </ScrollPane>
+    <BorderPane>
+        <center>
+            <StackPane fx:id="imagePane" styleClass="canvas" minWidth="200" minHeight="200">
+                <Label fx:id="placeholder" text="Generated images appear here" styleClass="muted"/>
+                <ImageView fx:id="imageView" preserveRatio="true" smooth="true"/>
+            </StackPane>
+        </center>
+        <bottom>
+            <VBox spacing="6">
+                <padding><Insets top="8" right="12" bottom="8" left="12"/></padding>
+                <HBox spacing="8" alignment="CENTER_LEFT">
+                    <Button fx:id="saveButton" text="Save PNG..." onAction="#onSave"/>
+                    <Button fx:id="copyButton" text="Copy" onAction="#onCopy"/>
+                    <Button fx:id="reuseSeedButton" text="Reuse seed" onAction="#onReuseSeed"/>
+                    <Region HBox.hgrow="ALWAYS"/>
+                    <Label fx:id="resultInfo" styleClass="muted"/>
+                </HBox>
+                <ScrollPane fitToHeight="true" prefHeight="92" vbarPolicy="NEVER" styleClass="history">
+                    <HBox fx:id="historyBox" spacing="6" alignment="CENTER_LEFT">
+                        <padding><Insets top="4" right="4" bottom="4" left="4"/></padding>
+                    </HBox>
+                </ScrollPane>
+            </VBox>
+        </bottom>
+    </BorderPane>
+</SplitPane>
