@@ -2,6 +2,7 @@ package net.talaatharb.imagegen;
 
 import java.awt.AWTException;
 import java.awt.Color;
+import java.awt.CheckboxMenuItem;
 import java.awt.EventQueue;
 import java.awt.Graphics2D;
 import java.awt.MenuItem;
@@ -14,14 +15,19 @@ import java.lang.reflect.InvocationTargetException;
 
 import javafx.application.Platform;
 import javafx.stage.Stage;
+import net.talaatharb.imagegen.ui.MainController;
 
 /** Bridges native AWT tray events to the JavaFX application thread. */
 final class ApplicationTray implements AutoCloseable {
     private final Stage stage;
+    private final MainController controller;
     private TrayIcon icon;
+    private CheckboxMenuItem mcp;
+    private MenuItem mcpSettings;
 
-    ApplicationTray(Stage stage) {
+    ApplicationTray(Stage stage, MainController controller) {
         this.stage = stage;
+        this.controller = controller;
     }
 
     void install() throws AWTException {
@@ -29,6 +35,7 @@ final class ApplicationTray implements AutoCloseable {
             throw new AWTException("The system tray is not supported on this desktop.");
         }
         AWTException[] failure = new AWTException[1];
+        boolean mcpEnabled = controller.mcpEnabledProperty().get();
         onAwtThread(() -> {
             PopupMenu menu = new PopupMenu();
             MenuItem maximize = new MenuItem("Maximize");
@@ -36,6 +43,23 @@ final class ApplicationTray implements AutoCloseable {
             MenuItem exit = new MenuItem("Exit");
             exit.addActionListener(e -> Platform.runLater(Platform::exit));
             menu.add(maximize);
+            menu.addSeparator();
+            mcp = new CheckboxMenuItem("MCP server", mcpEnabled);
+            mcp.addItemListener(e -> {
+                boolean enabled = mcp.getState();
+                Platform.runLater(() -> {
+                    controller.setMcpEnabled(enabled);
+                    updateMcpMenu(controller.mcpEnabledProperty().get());
+                });
+            });
+            mcpSettings = new MenuItem("MCP settings...");
+            mcpSettings.setEnabled(!mcp.getState());
+            mcpSettings.addActionListener(e -> Platform.runLater(() -> {
+                maximize();
+                controller.showMcpSettings();
+            }));
+            menu.add(mcp);
+            menu.add(mcpSettings);
             menu.addSeparator();
             menu.add(exit);
             TrayIcon candidate = new TrayIcon(createIcon(), "Image Gen Studio", menu);
@@ -51,10 +75,18 @@ final class ApplicationTray implements AutoCloseable {
         if (failure[0] != null) {
             throw failure[0];
         }
+        controller.mcpEnabledProperty().addListener((observable, oldValue, enabled) -> updateMcpMenu(enabled));
         Platform.setImplicitExit(false);
         stage.setOnCloseRequest(event -> {
             event.consume();
             stage.hide();
+        });
+    }
+
+    private void updateMcpMenu(boolean enabled) {
+        EventQueue.invokeLater(() -> {
+            mcp.setState(enabled);
+            mcpSettings.setEnabled(!enabled);
         });
     }
 

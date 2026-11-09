@@ -1,5 +1,6 @@
 package net.talaatharb.imagegen.ui;
 
+import java.io.IOException;
 import java.util.List;
 
 import com.google.inject.Inject;
@@ -10,37 +11,48 @@ import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ComboBox;
+import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.Spinner;
+import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
+import javafx.scene.layout.GridPane;
+import javafx.util.StringConverter;
 import net.talaatharb.imagegen.config.AppSettings;
 import net.talaatharb.imagegen.generation.sdcpp.SdCppPlatform;
+import net.talaatharb.imagegen.mcp.ImageGenerationMcpServer;
 import net.talaatharb.imagegen.model.GpuRuntime;
 import net.talaatharb.imagegen.model.ModelStore;
 import net.talaatharb.imagegen.service.ImageGenerationService;
 
 /**
  * Hosts the task tabs (image generation today; editing and other image tasks get their own tabs) and the shared
- * status bar with the GPU switch.
+ * status bar with GPU and localhost MCP switches.
  */
 public class MainController {
     private final TaskRunner runner;
     private final AppSettings settings;
     private final ModelStore store;
     private final List<ImageGenerationService> generationServices;
+    private final ImageGenerationMcpServer mcpServer;
 
     @FXML private Label statusLabel;
     @FXML private ProgressBar statusProgress;
     @FXML private Button cancelButton;
     @FXML private CheckBox gpuCheck;
+    @FXML private ToggleButton mcpToggle;
+    @FXML private Button mcpSettingsButton;
 
     @Inject
     public MainController(TaskRunner runner, AppSettings settings, ModelStore store,
-            List<ImageGenerationService> generationServices) {
+            List<ImageGenerationService> generationServices, ImageGenerationMcpServer mcpServer) {
         this.runner = runner;
         this.settings = settings;
         this.store = store;
         this.generationServices = generationServices;
+        this.mcpServer = mcpServer;
     }
 
     @FXML
@@ -49,6 +61,9 @@ public class MainController {
         statusProgress.progressProperty().bind(runner.progressProperty());
         statusProgress.visibleProperty().bind(runner.runningProperty());
         cancelButton.disableProperty().bind(runner.runningProperty().not());
+        mcpToggle.setSelected(false);
+        mcpToggle.setTooltip(new Tooltip("Start a localhost-only MCP HTTP server. Always off at startup."));
+        mcpSettingsButton.disableProperty().bind(mcpToggle.selectedProperty());
         if (SdCppPlatform.hasSeparateGpuBuild() || GpuRuntime.isSupported()) {
             gpuCheck.setSelected(GpuRuntime.isRequested());
             gpuCheck.disableProperty().bind(runner.runningProperty());
@@ -63,11 +78,100 @@ public class MainController {
             gpuCheck.setDisable(true);
             gpuCheck.setTooltip(new Tooltip("No prebuilt GPU runtime is available for this platform"));
         }
+
+    }
+
+    @FXML
+    private void onMcpToggled() {
+        if (!mcpToggle.isSelected()) {
+            mcpServer.close();
+            mcpToggle.setTooltip(new Tooltip("MCP server is off"));
+            return;
+        }
+
+        try {
+            mcpServer.start();
+            mcpToggle.setTooltip(new Tooltip("MCP listening at " + mcpServer.endpoint()));
+        } catch (IOException | IllegalArgumentException e) {
+            mcpToggle.setSelected(false);
+            org.slf4j.LoggerFactory.getLogger(MainController.class).warn("Could not start MCP server", e);
+            UiSupport.error("MCP server could not start", e.getMessage());
+        }
+    }
+
+    @FXML
+    private void onMcpSettings() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(mcpToggle.getScene().getWindow());
+        dialog.setTitle("MCP server settings");
+        dialog.setHeaderText("Localhost only. Stop the server before changing settings.");
+        Spinner<Integer> port;
+        try {
+            int configuredPort = settings.mcpPort();
+            if (configuredPort < 1 || configuredPort > 65535) {
+                throw new IllegalArgumentException("MCP port must be between 1 and 65535");
+            }
+            port = new Spinner<>(1, 65535, configuredPort);
+        } catch (IllegalArgumentException e) {
+            UiSupport.error("Invalid MCP settings", e.getMessage());
+            return;
+        }
+        port.setEditable(true);
+        ComboBox<ImageGenerationService> model = new ComboBox<>();
+        model.getItems().setAll(generationServices);
+        model.setConverter(new StringConverter<>() {
+            @Override public String toString(ImageGenerationService value) {
+                return value == null ? "" : value.displayName();
+            }
+            @Override public ImageGenerationService fromString(String value) {
+                throw new UnsupportedOperationException("Select a model from the list");
+            }
+        });
+        generationServices.stream().filter(m -> m.id().equals(settings.mcpModel())).findFirst()
+                .ifPresent(model::setValue);
+        GridPane fields = new GridPane();
+        fields.setHgap(12);
+        fields.setVgap(12);
+        fields.addRow(0, new Label("Port:"), port);
+        fields.addRow(1, new Label("Default model:"), model);
+        dialog.getDialogPane().setContent(fields);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        javafx.scene.Node ok = dialog.getDialogPane().lookupButton(ButtonType.OK);
+        ok.disableProperty().bind(model.valueProperty().isNull());
+        ok.addEventFilter(javafx.event.ActionEvent.ACTION, event -> {
+            try {
+                int value = Integer.parseInt(port.getEditor().getText().trim());
+                if (value < 1 || value > 65535) {
+                    throw new IllegalArgumentException("Port must be between 1 and 65535");
+                }
+                port.getValueFactory().setValue(value);
+            } catch (IllegalArgumentException e) {
+                event.consume();
+                UiSupport.error("Invalid MCP port", "Enter a port between 1 and 65535");
+            }
+        });
+        dialog.showAndWait().filter(ButtonType.OK::equals)
+                .ifPresent(ignored -> settings.setMcpConfiguration(port.getValue(), model.getValue().id()));
     }
 
     @FXML
     private void onCancel() {
         runner.cancel();
+    }
+
+    public javafx.beans.property.ReadOnlyBooleanProperty mcpEnabledProperty() {
+        return mcpToggle.selectedProperty();
+    }
+
+    public void setMcpEnabled(boolean enabled) {
+        mcpToggle.setSelected(enabled);
+        onMcpToggled();
+    }
+
+    public void showMcpSettings() {
+        if (!mcpServer.isRunning()) {
+            onMcpSettings();
+        }
     }
 
     @FXML

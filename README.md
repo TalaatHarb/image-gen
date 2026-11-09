@@ -76,6 +76,44 @@ Turn on **GPU** in the status bar. The setting is saved in `~/.image-gen/setting
 - **ONNX models** use DirectML on Windows x64 (any DirectX 12 GPU). The DirectML build of ONNX Runtime (~15 MB) is downloaded the first time, and the app may need a restart.
 - With 4 GB of VRAM, prefer SDXS, SD 1.5 (+LCM) or SD-Turbo. The transformer models (PixArt, FLUX, Z-Image) need 6–8 GB or more, or run on the CPU with 16 GB+ of RAM.
 
+## Local MCP server (optional)
+
+The **MCP** toggle beside GPU starts a Streamable HTTP MCP endpoint at
+`http://127.0.0.1:8764/mcp`. It is **off on every startup**, even if it was enabled
+last time. Turning it off or exiting the app stops the listener and cancels its active generation.
+
+Use **MCP settings...** while the server is off to change its port and default model.
+The system tray menu also has an **MCP server** checkbox and **MCP settings...**.
+Tray and window toggles stay synchronized; settings are disabled in both while MCP is running.
+The initial model is **Stable Diffusion 1.5 + LCM-LoRA** (`sd15-lcm`). These preferences
+are saved as `mcp.port` and `mcp.model` in `~/.image-gen/settings.properties`.
+
+Connect an MCP client using its Streamable HTTP URL setting. Available tools:
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `list_models` | None | Model IDs, installed status, supported sizes and generation defaults |
+| `generate_image` | Required `prompt`; optional `model`, `negative_prompt`, `width`, `height`, `steps`, `guidance_scale`, `seed` | Base64 PNG image content plus model, dimensions, elapsed time and the actual seed |
+
+Omitted generation settings use the chosen model's defaults; `seed` defaults to `-1`
+(random). Optional values may also be null, empty/whitespace, or `"default"` (case-insensitive).
+Numeric strings are accepted. Invalid optional values or unknown models fall back to defaults;
+unsupported negative prompts/guidance and extra arguments are ignored. Corrections are reported
+in the result metadata's `warnings` array. A nonblank string `prompt` (up to 8192 characters)
+is still required, and transport, unavailable-model, busy and runtime errors remain errors.
+For example, call `generate_image` with `{"prompt":"a fox in a meadow","model":"default","seed":42}`.
+Download the desired model in the app first; MCP will report a missing-model error rather
+than initiate a large model download. GPU mode applies to MCP generation too (a missing
+GPU executable may still be downloaded). UI and MCP requests share one worker; a busy
+app returns a tool error. The status bar shows remote progress and **Cancel** cancels it.
+
+The server binds explicitly to **127.0.0.1**, never a wildcard address. Host and Origin
+headers are checked against localhost and the configured port, and no CORS access is
+enabled. It has no authentication: only enable it while trusted local clients need access.
+It supports stateless JSON responses (MCP 2025-03-26, 2025-06-18 and 2025-11-25), not
+legacy HTTP+SSE, server-push streams or client cancellation notifications. Clients should
+allow enough time for CPU inference, which can take minutes.
+
 ## Configuration
 
 | System property | Default | Purpose |
@@ -106,7 +144,8 @@ java -jar target/image-gen-*-jar-with-dependencies.jar
 ```
 mvn verify                                                         # unit tests
 mvn test -Dtest=ModelsIntegrationTest -Dimagegen.integration=true  # real models
-mvn test -Dtest=GenerationTabIntegrationTest -Dimagegen.integration=true  # clicks Generate in the real window
+mvn test -Dtest=GenerationTabIntegrationTest -Dimagegen.integration=true  # MCP + Generate in the real window
+mvn test -Dtest=TrayIntegrationTest -Dimagegen.integration=true  # native tray controls (run separately)
 ```
 
 The integration tests download the models they need:
@@ -115,6 +154,8 @@ The integration tests download the models they need:
 - a tiny ONNX test model
 
 They write the generated images to `target/integration-images`.
+The window test also exercises the MCP toggle, busy errors and cancellation, then generates
+with SD 1.5 + LCM over HTTP. That model must already be downloaded.
 
 ## Structure
 
@@ -133,6 +174,7 @@ net.talaatharb.imagegen
 ├── generation/onnx/              ONNX Runtime pipeline: CLIP tokenizer, LCM/Euler-a schedulers, model catalog
 ├── image/                        tensor <-> image conversion, latent previews
 ├── model/                        Hugging Face downloader (resumable), model cache, ONNX helpers, DirectML runtime
+├── mcp/                          localhost-only HTTP MCP tools, using the shared generation worker
 └── ui/                           main window, Image Generation tab, background task runner
 ```
 

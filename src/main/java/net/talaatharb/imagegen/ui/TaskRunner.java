@@ -1,6 +1,7 @@
 package net.talaatharb.imagegen.ui;
 
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
@@ -57,8 +58,38 @@ public class TaskRunner {
 
     /** Starts work unless another job is running; callbacks are invoked on the JavaFX thread. */
     public <T> boolean submit(String title, Work<T> work, Consumer<T> onSuccess, Consumer<Throwable> onFailure) {
+        return submit(title, work, onSuccess, onFailure, () -> {}, true);
+    }
+
+    /** HTTP jobs share the UI queue, but return errors to the client instead of opening dialogs. */
+    public <T> CompletableFuture<T> submitRemote(String title, Work<T> work) {
+        CompletableFuture<T> result = new CompletableFuture<>();
+        runLater(() -> {
+            if (result.isCancelled()) {
+                return;
+            }
+            boolean started = submit(title, work, result::complete, result::completeExceptionally,
+                    () -> result.cancel(false), false);
+            if (!started) {
+                result.completeExceptionally(new IllegalStateException("Busy: " + message.get()));
+                return;
+            }
+            Task<?> task = current;
+            result.whenComplete((value, error) -> {
+                if (result.isCancelled()) {
+                    runLater(() -> task.cancel(true));
+                }
+            });
+        });
+        return result;
+    }
+
+    private <T> boolean submit(String title, Work<T> work, Consumer<T> onSuccess, Consumer<Throwable> onFailure,
+            Runnable onCancelled, boolean showErrors) {
         if (running.get()) {
-            UiSupport.error("Busy", "Please wait for \"" + message.get() + "\" to finish or cancel it first.");
+            if (showErrors) {
+                UiSupport.error("Busy", "Please wait for \"" + message.get() + "\" to finish or cancel it first.");
+            }
             return false;
         }
         Task<T> task = new WorkTask<>(title, work);
@@ -72,18 +103,24 @@ public class TaskRunner {
                 onSuccess.accept(task.getValue());
             }
         });
-        task.setOnCancelled(e -> finish("Cancelled: " + title));
+        task.setOnCancelled(e -> {
+            finish("Cancelled: " + title);
+            onCancelled.run();
+        });
         task.setOnFailed(e -> {
             Throwable error = task.getException();
             if (error instanceof CancellationException) {
                 finish("Cancelled: " + title);
+                onCancelled.run();
                 return;
             }
             finish("Failed: " + title);
             if (onFailure != null) {
                 onFailure.accept(error);
             }
-            UiSupport.error(title + " failed", error.getMessage() == null ? error.toString() : error.getMessage());
+            if (showErrors) {
+                UiSupport.error(title + " failed", error.getMessage() == null ? error.toString() : error.getMessage());
+            }
         });
         executor.submit(task);
         return true;

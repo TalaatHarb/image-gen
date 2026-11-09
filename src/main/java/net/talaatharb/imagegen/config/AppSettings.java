@@ -42,6 +42,23 @@ public class AppSettings {
         save();
     }
 
+    public synchronized int mcpPort() {
+        return Integer.parseInt(properties.getProperty("mcp.port", "8764"));
+    }
+
+    public synchronized String mcpModel() {
+        return properties.getProperty("mcp.model", "sd15-lcm");
+    }
+
+    public synchronized void setMcpConfiguration(int port, String model) {
+        if (port < 1 || port > 65535 || model == null || model.isBlank()) {
+            throw new IllegalArgumentException("Choose a model and a port between 1 and 65535");
+        }
+        properties.setProperty("mcp.port", Integer.toString(port));
+        properties.setProperty("mcp.model", model);
+        save();
+    }
+
     private void save() {
         try {
             Files.createDirectories(file.toAbsolutePath().getParent());

@@ -22,6 +22,7 @@ import net.talaatharb.imagegen.config.AppModule;
 import net.talaatharb.imagegen.config.AppSettings;
 import net.talaatharb.imagegen.model.GpuRuntime;
 import net.talaatharb.imagegen.model.ModelStore;
+import net.talaatharb.imagegen.mcp.ImageGenerationMcpServer;
 import net.talaatharb.imagegen.service.ImageGenerationService;
 import net.talaatharb.imagegen.ui.TaskRunner;
 
@@ -66,7 +67,7 @@ public class ImageGenApp extends Application {
         scene.getStylesheets().add(getClass().getResource("ui/app.css").toExternalForm());
         stage.setScene(scene);
         stage.show();
-        tray = new ApplicationTray(stage);
+        tray = new ApplicationTray(stage, loader.getController());
         if (activationPending) {
             activateWindow();
         }
@@ -112,6 +113,7 @@ public class ImageGenApp extends Application {
     }
 
     private void closeServices() {
+        injector.getInstance(ImageGenerationMcpServer.class).close();
         injector.getInstance(TaskRunner.class).shutdown();
         injector.getInstance(Key.get(new TypeLiteral<List<ImageGenerationService>>() {
         })).forEach(ImageGenerationService::close);
