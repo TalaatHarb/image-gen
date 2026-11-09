@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -49,6 +50,8 @@ class ImageGenerationMcpServerTest {
     private final HttpClient client = HttpClient.newHttpClient();
     private final FakeModel lcm = new FakeModel("sd15-lcm");
     private final FakeModel other = new FakeModel("other");
+    private final FakeEditor editor = new FakeEditor();
+    private final FakeUpscaler upscaler = new FakeUpscaler();
     private AppSettings settings;
     private ImageGenerationMcpServer server;
     private CompletableFuture<?> pending;
@@ -78,7 +81,7 @@ class ImageGenerationMcpServerTest {
         try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
             settings.setMcpConfiguration(socket.getLocalPort(), settings.mcpModel());
         }
-        server = new ImageGenerationMcpServer(settings, List.of(lcm, other), runner);
+        server = new ImageGenerationMcpServer(settings, List.of(lcm, other), runner, List.of(editor), List.of(upscaler));
         assertFalse(server.isRunning());
         server.start();
     }
@@ -119,7 +122,7 @@ class ImageGenerationMcpServerTest {
         assertEquals(202, send(post("""
                 {"jsonrpc":"2.0","method":"notifications/initialized"}
                 """)).statusCode());
-        assertEquals(2, rpc("tools/list", "{}").path("result").path("tools").size());
+        assertEquals(4, rpc("tools/list", "{}").path("result").path("tools").size());
         JsonNode listed = rpc("tools/call", """
                 {"name":"list_models","arguments":{}}
                 """).path("result");
@@ -152,7 +155,7 @@ class ImageGenerationMcpServerTest {
         settings.setMcpConfiguration(settings.mcpPort(), "other");
         AppSettings reloaded = new AppSettings(dir.resolve("settings.properties"));
         assertEquals("other", reloaded.mcpModel());
-        server = new ImageGenerationMcpServer(reloaded, List.of(lcm, other), runner);
+        server = new ImageGenerationMcpServer(reloaded, List.of(lcm, other), runner, List.of(editor), List.of(upscaler));
         assertFalse(server.isRunning());
         server.start();
         rpc("tools/call", """
@@ -228,7 +231,8 @@ class ImageGenerationMcpServerTest {
         assertEquals(400, send(post(ping).header("MCP-Protocol-Version", "invalid")).statusCode());
         assertEquals(406, send(post(ping).setHeader("Accept", "application/json")).statusCode());
         assertEquals(415, send(post(ping).setHeader("Content-Type", "text/plain")).statusCode());
-        assertEquals(413, send(post("x".repeat(65537))).statusCode());
+        assertEquals(413, send(post(ping.replace("\"method\":\"ping\"", "\"method\":\"ping\",\"padding\":\""
+                + "x".repeat(65537) + "\""))).statusCode());
         assertEquals(405, send(HttpRequest.newBuilder(URI.create(server.endpoint())).GET()).statusCode());
         assertEquals(-32700, json.readTree(send(post("{")).body()).path("error").path("code").asInt());
         assertEquals(-32700, json.readTree(send(post(ping + "{}")).body()).path("error").path("code").asInt());
@@ -268,6 +272,86 @@ class ImageGenerationMcpServerTest {
         }
         assertTrue(pending.isCancelled());
         assertFalse(server.isRunning());
+    }
+
+    @Test
+    void editsAndUpscalesBase64InputsWithResilientDefaults() throws Exception {
+        String image = encodedImage(64, 64);
+        JsonNode edited = rpc("tools/call", """
+                {"name":"edit_image","arguments":{"image":"%s","prompt":"fox","model":"default","mode":"",
+                 "strength":"default","width":"64","steps":null,"guidance_scale":"invalid"}}
+                """.formatted(image)).path("result");
+        assertFalse(edited.path("isError").asBoolean(), edited.toString());
+        assertEquals(net.talaatharb.imagegen.service.ImageEditingRequest.Mode.IMG2IMG, editor.last.mode());
+        assertEquals(0.75f, editor.last.strength());
+        assertEquals(4, editor.last.generation().steps());
+        JsonNode upscaled = rpc("tools/call", """
+                {"name":"upscale_image","arguments":{"image":"data:image/png;base64,%s","model":null,"tile_size":"default"}}
+                """.formatted(image)).path("result");
+        assertFalse(upscaled.path("isError").asBoolean(), upscaled.toString());
+        assertEquals(128, upscaler.tile);
+        assertEquals(256, json.readTree(upscaled.path("content").get(0).path("text").asText()).path("width").asInt());
+        assertEquals("image/png", upscaled.path("content").get(1).path("mimeType").asText());
+    }
+
+    @Test
+    void requiresInputAndMaskButDoesNotFailOnOptionalMistakes() throws Exception {
+        String image = encodedImage(64, 64);
+        for (String arguments : List.of("{\"prompt\":\"fox\"}", "{\"image\":\"invalid\",\"prompt\":\"fox\"}",
+                "{\"image\":\"" + image + "\",\"prompt\":\"fox\",\"mode\":\"inpaint\"}",
+                "{\"image\":\"" + image + "\",\"prompt\":\"fox\",\"mode\":\"inpaint\",\"mask\":\""
+                        + encodedImage(32, 32) + "\"}")) {
+            assertEquals(-32602, rpc("tools/call", "{\"name\":\"edit_image\",\"arguments\":" + arguments + "}")
+                    .path("error").path("code").asInt());
+        }
+        assertEquals(-32602, rpc("tools/call", "{\"name\":\"upscale_image\",\"arguments\":{}}")
+                .path("error").path("code").asInt());
+        JsonNode result = rpc("tools/call", """
+                {"name":"edit_image","arguments":{"image":"%s","mask":"%s","prompt":"fox","mode":"inpaint",
+                 "model":"unknown","strength":999,"extra":true}}
+                """.formatted(image, image)).path("result");
+        assertFalse(result.path("isError").asBoolean(), result.toString());
+        assertEquals(net.talaatharb.imagegen.service.ImageEditingRequest.Mode.INPAINT, editor.last.mode());
+        assertEquals(0.75f, editor.last.strength());
+        assertNotNull(editor.last.mask());
+    }
+
+    private static String encodedImage(int width, int height) throws Exception {
+        var bytes = new java.io.ByteArrayOutputStream();
+        ImageIO.write(new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB), "png", bytes);
+        return Base64.getEncoder().encodeToString(bytes.toByteArray());
+    }
+
+    private static final class FakeEditor implements net.talaatharb.imagegen.service.ImageEditingService {
+        private net.talaatharb.imagegen.service.ImageEditingRequest last;
+        @Override public String id() { return "sd15"; }
+        @Override public String displayName() { return id(); }
+        @Override public String description() { return "test"; }
+        @Override public boolean isInstalled() { return true; }
+        @Override public void install(ProgressListener progress) { fail("Must not download"); }
+        @Override public GenerationDefaults defaults() { return GenerationDefaults.distilled(64, 4, 12, List.of(64)); }
+        @Override public boolean supports(net.talaatharb.imagegen.service.ImageEditingRequest.Mode mode) { return true; }
+        @Override public GeneratedImage edit(net.talaatharb.imagegen.service.ImageEditingRequest request,
+                ProgressListener progress, PreviewListener preview) {
+            last = request;
+            return new GeneratedImage(request.image(), id(), request.generation().withSeed(42), Duration.ofMillis(1));
+        }
+    }
+
+    private static final class FakeUpscaler implements net.talaatharb.imagegen.service.ImageUpscalingService {
+        private int tile;
+        @Override public String id() { return "realesrgan-x4plus"; }
+        @Override public String displayName() { return id(); }
+        @Override public String description() { return "test"; }
+        @Override public boolean isInstalled() { return true; }
+        @Override public void install(ProgressListener progress) { fail("Must not download"); }
+        @Override public int scale() { return 4; }
+        @Override public net.talaatharb.imagegen.service.UpscaledImage upscale(BufferedImage image, int tileSize,
+                ProgressListener progress) {
+            tile = tileSize;
+            return new net.talaatharb.imagegen.service.UpscaledImage(new BufferedImage(image.getWidth() * 4,
+                    image.getHeight() * 4, BufferedImage.TYPE_INT_RGB), id(), 4, Duration.ofMillis(1));
+        }
     }
 
     private static final class FakeModel implements ImageGenerationService {

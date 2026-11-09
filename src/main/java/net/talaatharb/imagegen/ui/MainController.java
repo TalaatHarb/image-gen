@@ -37,6 +37,12 @@ public class MainController {
     private final ModelStore store;
     private final List<ImageGenerationService> generationServices;
     private final ImageGenerationMcpServer mcpServer;
+    private final List<net.talaatharb.imagegen.service.ImageEditingService> editingServices;
+    private final List<net.talaatharb.imagegen.service.ImageUpscalingService> upscalingServices;
+    private final com.google.inject.Provider<ImageEditingPane> editingPane;
+    private final com.google.inject.Provider<ImageUpscalingPane> upscalingPane;
+    @FXML private javafx.scene.control.Tab editingTab;
+    @FXML private javafx.scene.control.Tab upscalingTab;
 
     @FXML private Label statusLabel;
     @FXML private ProgressBar statusProgress;
@@ -47,16 +53,26 @@ public class MainController {
 
     @Inject
     public MainController(TaskRunner runner, AppSettings settings, ModelStore store,
-            List<ImageGenerationService> generationServices, ImageGenerationMcpServer mcpServer) {
+            List<ImageGenerationService> generationServices, ImageGenerationMcpServer mcpServer,
+            com.google.inject.Provider<ImageEditingPane> editingPane,
+            com.google.inject.Provider<ImageUpscalingPane> upscalingPane,
+            List<net.talaatharb.imagegen.service.ImageEditingService> editingServices,
+            List<net.talaatharb.imagegen.service.ImageUpscalingService> upscalingServices) {
         this.runner = runner;
         this.settings = settings;
         this.store = store;
         this.generationServices = generationServices;
         this.mcpServer = mcpServer;
+        this.editingPane = editingPane;
+        this.upscalingPane = upscalingPane;
+        this.editingServices = editingServices;
+        this.upscalingServices = upscalingServices;
     }
 
     @FXML
     private void initialize() {
+        editingTab.setContent(editingPane.get());
+        upscalingTab.setContent(upscalingPane.get());
         statusLabel.textProperty().bind(runner.messageProperty());
         statusProgress.progressProperty().bind(runner.progressProperty());
         statusProgress.visibleProperty().bind(runner.runningProperty());
@@ -134,6 +150,25 @@ public class MainController {
         fields.setVgap(12);
         fields.addRow(0, new Label("Port:"), port);
         fields.addRow(1, new Label("Default model:"), model);
+        var editModel = UiSupport.modelCombo(editingServices.stream()
+                .filter(s -> s.supports(net.talaatharb.imagegen.service.ImageEditingRequest.Mode.IMG2IMG)).toList());
+        var instructionModel = UiSupport.modelCombo(editingServices.stream()
+                .filter(s -> s.supports(net.talaatharb.imagegen.service.ImageEditingRequest.Mode.INSTRUCTION)).toList());
+        var upscaleModel = UiSupport.modelCombo(upscalingServices);
+        selectConfigured(editModel, settings.mcpEditingModel());
+        selectConfigured(instructionModel, settings.mcpInstructionModel());
+        selectConfigured(upscaleModel, settings.mcpUpscalingModel());
+        ComboBox<String> editMode = new ComboBox<>();
+        editMode.getItems().setAll("img2img", "inpaint", "instruction");
+        editMode.setValue(settings.mcpEditingMode());
+        Spinner<Double> editStrength = new Spinner<>(0.05, 1.0, (double) settings.mcpEditingStrength(), 0.05);
+        Spinner<Integer> upscaleTile = new Spinner<>(32, 256, settings.mcpUpscalingTileSize(), 32);
+        fields.addRow(2, new Label("Img2img / inpainting model:"), editModel);
+        fields.addRow(3, new Label("Instruction editing model:"), instructionModel);
+        fields.addRow(4, new Label("Default editing mode:"), editMode);
+        fields.addRow(5, new Label("Editing strength:"), editStrength);
+        fields.addRow(6, new Label("Upscaling model (4x):"), upscaleModel);
+        fields.addRow(7, new Label("Upscaling tile size:"), upscaleTile);
         dialog.getDialogPane().setContent(fields);
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
         javafx.scene.Node ok = dialog.getDialogPane().lookupButton(ButtonType.OK);
@@ -151,12 +186,23 @@ public class MainController {
             }
         });
         dialog.showAndWait().filter(ButtonType.OK::equals)
-                .ifPresent(ignored -> settings.setMcpConfiguration(port.getValue(), model.getValue().id()));
+                .ifPresent(ignored -> {
+                    settings.setMcpConfiguration(port.getValue(), model.getValue().id());
+                    settings.setMcpTaskDefaults(editModel.getValue().id(), instructionModel.getValue().id(),
+                            editMode.getValue(), editStrength.getValue().floatValue(),
+                            upscaleModel.getValue().id(), upscaleTile.getValue());
+                });
     }
 
     @FXML
     private void onCancel() {
         runner.cancel();
+    }
+
+    private static <T extends net.talaatharb.imagegen.service.ImageModelService> void selectConfigured(
+            ComboBox<T> combo, String id) {
+        combo.setValue(combo.getItems().stream().filter(m -> m.id().equals(id)).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Unknown configured model: " + id)));
     }
 
     public javafx.beans.property.ReadOnlyBooleanProperty mcpEnabledProperty() {

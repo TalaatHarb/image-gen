@@ -36,6 +36,11 @@ import net.talaatharb.imagegen.service.GenerationDefaults;
 import net.talaatharb.imagegen.service.ImageGenerationRequest;
 import net.talaatharb.imagegen.service.ImageGenerationService;
 import net.talaatharb.imagegen.service.PreviewListener;
+import net.talaatharb.imagegen.service.ImageEditingRequest;
+import net.talaatharb.imagegen.service.ImageEditingService;
+import net.talaatharb.imagegen.service.ImageUpscalingService;
+import net.talaatharb.imagegen.image.ImageInputs;
+import java.awt.image.BufferedImage;
 import net.talaatharb.imagegen.ui.TaskRunner;
 
 /**
@@ -47,19 +52,25 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(ImageGenerationMcpServer.class);
     private static final Set<String> VERSIONS = Set.of("2025-03-26", "2025-06-18", "2025-11-25");
     private static final int MAX_BODY = 64 * 1024;
+    private static final int MAX_IMAGE_BODY = 24 * 1024 * 1024;
     private final ObjectMapper json = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private final AppSettings settings;
     private final List<ImageGenerationService> models;
     private final TaskRunner runner;
+    private final List<ImageEditingService> editors;
+    private final List<ImageUpscalingService> upscalers;
     private HttpServer server;
     private ExecutorService executor;
     private String defaultModel;
 
     @Inject
-    public ImageGenerationMcpServer(AppSettings settings, List<ImageGenerationService> models, TaskRunner runner) {
+    public ImageGenerationMcpServer(AppSettings settings, List<ImageGenerationService> models, TaskRunner runner,
+            List<ImageEditingService> editors, List<ImageUpscalingService> upscalers) {
         this.settings = settings;
         this.models = models;
         this.runner = runner;
+        this.editors = editors;
+        this.upscalers = upscalers;
     }
 
     public synchronized boolean isRunning() {
@@ -139,9 +150,9 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
                 send(exchange, 406, Map.of("error", "Accept must include application/json and text/event-stream"));
                 return;
             }
-            byte[] body = exchange.getRequestBody().readNBytes(MAX_BODY + 1);
-            if (body.length > MAX_BODY) {
-                send(exchange, 413, Map.of("error", "Request exceeds 64 KiB"));
+            byte[] body = exchange.getRequestBody().readNBytes(MAX_IMAGE_BODY + 1);
+            if (body.length > MAX_IMAGE_BODY) {
+                send(exchange, 413, Map.of("error", "Request exceeds 24 MiB"));
                 return;
             }
             JsonNode request;
@@ -159,6 +170,12 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
                 return;
             }
             JsonNode id = request.get("id");
+            boolean imageTool = "tools/call".equals(request.path("method").asText())
+                    && Set.of("edit_image", "upscale_image").contains(request.path("params").path("name").asText());
+            if (!imageTool && body.length > MAX_BODY) {
+                send(exchange, 413, Map.of("error", "Non-image requests must fit within 64 KiB"));
+                return;
+            }
             if (id == null) {
                 if (!"notifications/initialized".equals(request.path("method").asText())) {
                     send(exchange, 400, error(null, -32601, "Unsupported notification"));
@@ -202,7 +219,17 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
                     Map.of("name", "generate_image", "description",
                             "Generate a PNG locally. Default model: " + defaultModel
                                     + ". The model must already be downloaded in the app.",
-                            "inputSchema", generationSchema())));
+                            "inputSchema", generationSchema()),
+                    Map.of("name", "edit_image", "description",
+                            "Edit a base64 PNG/JPEG: img2img, inpaint (white mask edits), or instruction (FLUX.2 Klein). "
+                                    + "Download models in the app first; see list_models for compatible modes.",
+                            "inputSchema", editingSchema()),
+                    Map.of("name", "upscale_image", "description",
+                            "Upscale a base64 PNG/JPEG 4x with Real-ESRGAN. Download the model in the app first.",
+                            "inputSchema", Map.of("type", "object", "required", List.of("image"),
+                                    "properties", Map.of("image", imageSchema(), "model",
+                                            Map.of("type", List.of("string", "null"), "default", settings.mcpUpscalingModel()),
+                                            "tile_size", optionalNumber("Tile size: 32-256 in multiples of 32", true))))));
             case "tools/call" -> call(params);
             default -> throw new UnknownMethodException("Unknown method: " + method);
         };
@@ -227,6 +254,28 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
                 "description", description + ". Empty, null, 'default' or invalid values use model defaults.");
     }
 
+    private static Object imageSchema() {
+        return Map.of("type", "string", "description",
+                "Base64 PNG/JPEG bytes or data:image/png;base64,... (max 8 MiB decoded file, 16 MP). Not a file path.");
+    }
+
+    private Object editingSchema() {
+        Map<String, Object> properties = new java.util.LinkedHashMap<>();
+        properties.put("image", imageSchema());
+        properties.put("mask", imageSchema());
+        properties.put("prompt", Map.of("type", "string", "minLength", 1, "maxLength", 8192));
+        properties.put("mode", Map.of("type", List.of("string", "null"), "default", settings.mcpEditingMode(),
+                "description", "img2img, inpaint, instruction. Unknown/empty values use default."));
+        properties.put("model", Map.of("type", List.of("string", "null"), "description",
+                "Optional editing model ID/name. Default depends on mode; see list_models."));
+        properties.put("strength", optionalNumber("Denoising strength >0 to 1 (unused for instruction)", false));
+        for (String key : List.of("width", "height", "steps", "guidance_scale", "seed")) {
+            properties.put(key, optionalNumber("Uses the selected model's defaults", !key.equals("guidance_scale")));
+        }
+        properties.put("negative_prompt", Map.of("type", List.of("string", "null")));
+        return Map.of("type", "object", "required", List.of("image", "prompt"), "properties", properties);
+    }
+
     private Object call(JsonNode params) throws IOException {
         String name = text(params, "name", null);
         if ("generate_image".equals(name)) {
@@ -239,10 +288,26 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
         if ("list_models".equals(name)) {
             return textResult(json.writeValueAsString(Map.of("default_model", defaultModel, "models",
                     models.stream().map(m -> Map.of("id", m.id(), "name", m.displayName(),
-                            "installed", m.isInstalled(), "defaults", m.defaults())).toList())), false);
+                            "installed", m.isInstalled(), "defaults", m.defaults())).toList(),
+                    "editing", editors.stream().map(m -> Map.of("id", m.id(), "name", m.displayName(),
+                            "installed", m.isInstalled(), "defaults", m.defaults(), "modes",
+                            java.util.Arrays.stream(ImageEditingRequest.Mode.values()).filter(m::supports)
+                                    .map(ImageEditingRequest.Mode::id).toList())).toList(),
+                    "upscaling", upscalers.stream().map(m -> Map.of("id", m.id(), "name", m.displayName(),
+                            "installed", m.isInstalled(), "scale", m.scale())).toList(),
+                    "task_defaults", Map.of("edit_model", settings.mcpEditingModel(),
+                            "instruction_model", settings.mcpInstructionModel(), "edit_mode", settings.mcpEditingMode(),
+                            "strength", settings.mcpEditingStrength(), "upscale_model", settings.mcpUpscalingModel(),
+                            "tile_size", settings.mcpUpscalingTileSize()))), false);
         }
         if (!args.isObject()) {
             throw new IllegalArgumentException("arguments must be an object containing a prompt");
+        }
+        if ("edit_image".equals(name)) {
+            return edit(args);
+        }
+        if ("upscale_image".equals(name)) {
+            return upscale(args);
         }
         if (!"generate_image".equals(name)) {
             throw new IllegalArgumentException("Unknown tool: " + name);
@@ -263,6 +328,18 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
                     return model(defaultModel);
                 });
         GenerationDefaults d = service.defaults();
+        ImageGenerationRequest request = generationRequest(args, d, warnings);
+        LOG.info("MCP generate_image requested: model={}, size={}x{}, steps={}, guidance={}, seed={}, corrections={}",
+                service.id(), request.width(), request.height(), request.steps(), request.guidanceScale(),
+                request.seed(), warnings.size());
+        CompletableFuture<GeneratedImage> job = runner.submitRemote("MCP: " + service.displayName(), progress -> {
+            requireInstalled(service);
+            return service.generate(request, progress, PreviewListener.NONE);
+        });
+        return awaitImage(job, "generate_image", warnings);
+    }
+
+    private ImageGenerationRequest generationRequest(JsonNode args, GenerationDefaults d, List<String> warnings) {
         int width = (int) optionalNumber(args, "width", d.width(),
                 n -> d.sizes().stream().anyMatch(size -> n.compareTo(java.math.BigDecimal.valueOf(size)) == 0), warnings);
         int height = (int) optionalNumber(args, "height", d.height(),
@@ -286,23 +363,18 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
             warnings.add("Ignored custom guidance_scale for this model");
             guidance = d.guidanceScale();
         }
-        ImageGenerationRequest request = new ImageGenerationRequest(prompt, negative, width, height, steps, guidance, seed);
-        LOG.info("MCP generate_image requested: model={}, size={}x{}, steps={}, guidance={}, seed={}, corrections={}",
-                service.id(), width, height, steps, guidance, seed, warnings.size());
-        CompletableFuture<GeneratedImage> job = runner.submitRemote("MCP: " + service.displayName(), progress -> {
-            if (!service.isInstalled()) {
-                throw new IllegalStateException("Download " + service.displayName() + " in the app before using MCP");
-            }
-            return service.generate(request, progress, PreviewListener.NONE);
-        });
+        return new ImageGenerationRequest(prompt, negative, width, height, steps, guidance, seed);
+    }
+
+    private Object awaitImage(CompletableFuture<GeneratedImage> job, String tool, List<String> warnings) throws IOException {
         try {
             GeneratedImage image = job.get();
             ByteArrayOutputStream png = new ByteArrayOutputStream();
             if (!ImageIO.write(image.image(), "png", png)) {
                 throw new IOException("No PNG encoder available");
             }
-            LOG.info("MCP generate_image completed: model={}, size={}x{}, seed={}, elapsedMs={}, pngBytes={}",
-                    image.modelId(), image.image().getWidth(), image.image().getHeight(), image.request().seed(),
+            LOG.info("MCP {} completed: model={}, size={}x{}, seed={}, elapsedMs={}, pngBytes={}",
+                    tool, image.modelId(), image.image().getWidth(), image.image().getHeight(), image.request().seed(),
                     image.elapsed().toMillis(), png.size());
             return Map.of("isError", false, "content", List.of(
                     Map.of("type", "text", "text", json.writeValueAsString(Map.of(
@@ -314,15 +386,128 @@ public final class ImageGenerationMcpServer implements AutoCloseable {
         } catch (InterruptedException e) {
             job.cancel(true);
             Thread.currentThread().interrupt();
-            LOG.info("MCP generate_image cancelled because the server stopped");
+            LOG.info("MCP {} cancelled because the server stopped", tool);
             return textResult("MCP server stopped; generation cancelled", true);
         } catch (CancellationException e) {
-            LOG.info("MCP generate_image cancelled");
+            LOG.info("MCP {} cancelled", tool);
             return textResult("Generation cancelled", true);
         } catch (ExecutionException e) {
             LOG.warn("MCP generation failed", e.getCause());
             return textResult(e.getCause().getMessage() == null ? "Generation failed" : e.getCause().getMessage(), true);
         }
+
+    }
+
+    private static void requireInstalled(net.talaatharb.imagegen.service.ImageModelService service) {
+        if (!service.isInstalled()) {
+            throw new IllegalStateException("Download " + service.displayName() + " in the app before using MCP");
+        }
+    }
+
+    private BufferedImage inputImage(JsonNode args, String key) {
+        try {
+            return ImageInputs.base64(text(args, key, null));
+        } catch (IOException e) {
+            throw new IllegalArgumentException(key + " is not a readable PNG/JPEG", e);
+        }
+    }
+
+    private Object edit(JsonNode args) throws IOException {
+        LOG.info("Received MCP edit_image call");
+        List<String> warnings = new ArrayList<>();
+        ignoreExtra(args, Set.of("image", "mask", "mode", "model", "prompt", "negative_prompt",
+                "width", "height", "steps", "guidance_scale", "seed", "strength"), warnings);
+        String requestedMode = optionalText(args, "mode", settings.mcpEditingMode(), warnings);
+        ImageEditingRequest.Mode mode = java.util.Arrays.stream(ImageEditingRequest.Mode.values())
+                .filter(m -> m.id().equalsIgnoreCase(requestedMode.trim())).findFirst().orElseGet(() -> {
+                    warnings.add("Unknown mode; using " + settings.mcpEditingMode());
+                    return java.util.Arrays.stream(ImageEditingRequest.Mode.values())
+                            .filter(m -> m.id().equals(settings.mcpEditingMode())).findFirst()
+                            .orElseThrow(() -> new IllegalArgumentException("Invalid configured editing mode"));
+                });
+        String fallback = mode == ImageEditingRequest.Mode.INSTRUCTION
+                ? settings.mcpInstructionModel() : settings.mcpEditingModel();
+        List<ImageEditingService> compatible = editors.stream().filter(m -> m.supports(mode)).toList();
+        ImageEditingService service = chooseModel(args, compatible, fallback, warnings);
+        BufferedImage image = inputImage(args, "image");
+        BufferedImage mask = mode == ImageEditingRequest.Mode.INPAINT ? inputImage(args, "mask") : null;
+        if (mode != ImageEditingRequest.Mode.INPAINT && !useDefault(args.get("mask"))) {
+            warnings.add("Ignored mask; mode is not inpaint");
+        }
+        if (mode == ImageEditingRequest.Mode.INSTRUCTION && !useDefault(args.get("strength"))) {
+            warnings.add("Ignored strength; instruction mode uses a reference image");
+        }
+        float strength = (float) optionalNumber(args, "strength", settings.mcpEditingStrength(),
+                n -> n.signum() > 0 && n.compareTo(java.math.BigDecimal.ONE) <= 0, warnings);
+        var request = new ImageEditingRequest(image, mask, mode, generationRequest(args, service.defaults(), warnings), strength);
+        LOG.info("MCP edit_image requested: model={}, mode={}, input={}x{}, corrections={}",
+                service.id(), mode.id(), image.getWidth(), image.getHeight(), warnings.size());
+        return awaitImage(runner.submitRemote("MCP editing: " + service.displayName(), progress -> {
+            requireInstalled(service);
+            return service.edit(request, progress, PreviewListener.NONE);
+        }), "edit_image", warnings);
+    }
+
+    private Object upscale(JsonNode args) throws IOException {
+        LOG.info("Received MCP upscale_image call");
+        List<String> warnings = new ArrayList<>();
+        ignoreExtra(args, Set.of("image", "model", "tile_size"), warnings);
+        ImageUpscalingService service = chooseModel(args, upscalers, settings.mcpUpscalingModel(), warnings);
+        BufferedImage image = inputImage(args, "image");
+        if ((long) image.getWidth() * image.getHeight() * service.scale() * service.scale() > ImageInputs.MAX_PIXELS) {
+            throw new IllegalArgumentException("Upscaled output exceeds the 16 megapixel limit");
+        }
+        int tile = (int) optionalNumber(args, "tile_size", settings.mcpUpscalingTileSize(),
+                n -> isInteger(n) && n.intValue() >= 32 && n.intValue() <= 256
+                        && n.compareTo(java.math.BigDecimal.valueOf(n.intValue())) == 0 && n.intValue() % 32 == 0, warnings);
+        LOG.info("MCP upscale_image requested: model={}, input={}x{}, tile={}, corrections={}",
+                service.id(), image.getWidth(), image.getHeight(), tile, warnings.size());
+        var job = runner.submitRemote("MCP upscaling: " + service.displayName(), progress -> {
+            requireInstalled(service);
+            return service.upscale(image, tile, progress);
+        });
+        try {
+            var result = job.get();
+            ByteArrayOutputStream png = new ByteArrayOutputStream();
+            if (!ImageIO.write(result.image(), "png", png)) {
+                throw new IOException("No PNG encoder available");
+            }
+            LOG.info("MCP upscale_image completed: model={}, size={}x{}, elapsedMs={}", result.modelId(),
+                    result.image().getWidth(), result.image().getHeight(), result.elapsed().toMillis());
+            return Map.of("isError", false, "content", List.of(
+                    Map.of("type", "text", "text", json.writeValueAsString(Map.of("model", result.modelId(),
+                            "width", result.image().getWidth(), "height", result.image().getHeight(),
+                            "scale", result.scale(), "elapsed_ms", result.elapsed().toMillis(), "warnings", warnings))),
+                    Map.of("type", "image", "mimeType", "image/png", "data", Base64.getEncoder().encodeToString(png.toByteArray()))));
+        } catch (InterruptedException e) {
+            job.cancel(true);
+            Thread.currentThread().interrupt();
+            LOG.info("MCP upscale_image cancelled because the server stopped");
+            return textResult("Upscaling cancelled", true);
+        } catch (CancellationException e) {
+            LOG.info("MCP upscale_image cancelled");
+            return textResult("Upscaling cancelled", true);
+        } catch (ExecutionException e) {
+            LOG.warn("MCP upscaling failed", e.getCause());
+            return textResult(e.getCause().getMessage() == null ? "Upscaling failed" : e.getCause().getMessage(), true);
+        }
+    }
+
+    private static void ignoreExtra(JsonNode args, Set<String> allowed, List<String> warnings) {
+        args.fieldNames().forEachRemaining(key -> {
+            if (!allowed.contains(key)) { warnings.add("Ignored unknown argument: " + key); }
+        });
+    }
+
+    private static <T extends net.talaatharb.imagegen.service.ImageModelService> T chooseModel(
+            JsonNode args, List<T> choices, String fallback, List<String> warnings) {
+        String selected = optionalText(args, "model", fallback, warnings).trim();
+        return choices.stream().filter(m -> m.id().equalsIgnoreCase(selected) || m.displayName().equalsIgnoreCase(selected))
+                .findFirst().orElseGet(() -> {
+                    warnings.add("Unknown or incompatible model '" + selected + "'; using " + fallback);
+                    return choices.stream().filter(m -> m.id().equals(fallback)).findFirst()
+                            .orElseThrow(() -> new IllegalArgumentException("Invalid configured default model: " + fallback));
+                });
     }
 
     private ImageGenerationService model(String id) {

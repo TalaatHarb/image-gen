@@ -21,6 +21,8 @@
                 <Tab text="Image Generation">
                     <content><fx:include source="generation-tab.fxml"/></content>
                 </Tab>
+                <Tab fx:id="editingTab" text="Image Editing"/>
+                <Tab fx:id="upscalingTab" text="Upscaling"/>
             </tabs>
         </TabPane>
     </center>

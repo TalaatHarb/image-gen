@@ -53,4 +53,46 @@ public final class Images {
     private static int toByte(float value) {
         return Math.round(Math.max(0, Math.min(1, value)) * 255);
     }
+
+    public static BufferedImage resize(BufferedImage image, int width, int height, boolean nearest) {
+        BufferedImage resized = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        var graphics = resized.createGraphics();
+        try {
+            graphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, nearest
+                    ? java.awt.RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR
+                    : java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            graphics.drawImage(image, 0, 0, width, height, null);
+        } finally {
+            graphics.dispose();
+        }
+        return resized;
+    }
+
+    /** Prevent VAE reconstruction from changing pixels outside the inpainting mask. */
+    public static BufferedImage blendInpainting(BufferedImage original, BufferedImage generated, BufferedImage mask) {
+        int width = generated.getWidth();
+        int height = generated.getHeight();
+        if (original.getWidth() != width || original.getHeight() != height
+                || mask.getWidth() != width || mask.getHeight() != height) {
+            throw new IllegalArgumentException("Inpainting images must have matching dimensions");
+        }
+        BufferedImage result = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int m = mask.getRGB(x, y);
+                int weight = (int) Math.round(0.299 * ((m >> 16) & 255)
+                        + 0.587 * ((m >> 8) & 255) + 0.114 * (m & 255));
+                int source = original.getRGB(x, y);
+                int target = generated.getRGB(x, y);
+                int rgb = 0;
+                for (int shift = 16; shift >= 0; shift -= 8) {
+                    int value = ((((source >> shift) & 255) * (255 - weight))
+                            + (((target >> shift) & 255) * weight) + 127) / 255;
+                    rgb |= value << shift;
+                }
+                result.setRGB(x, y, rgb);
+            }
+        }
+        return result;
+    }
 }

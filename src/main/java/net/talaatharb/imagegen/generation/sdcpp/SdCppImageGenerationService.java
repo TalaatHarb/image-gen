@@ -26,6 +26,7 @@ import net.talaatharb.imagegen.service.ImageGenerationRequest;
 import net.talaatharb.imagegen.service.ImageGenerationService;
 import net.talaatharb.imagegen.service.ImageServiceException;
 import net.talaatharb.imagegen.service.PreviewListener;
+import net.talaatharb.imagegen.service.ImageEditingRequest;
 
 /** Text-to-image through stable-diffusion.cpp for one {@link SdCppModel}. */
 public class SdCppImageGenerationService implements ImageGenerationService {
@@ -113,6 +114,11 @@ public class SdCppImageGenerationService implements ImageGenerationService {
     @Override
     public GeneratedImage generate(ImageGenerationRequest request, ProgressListener progress,
             PreviewListener preview) {
+        return process(request, null, progress, preview);
+    }
+
+    GeneratedImage process(ImageGenerationRequest request, ImageEditingRequest editing, ProgressListener progress,
+            PreviewListener preview) {
         if (!isInstalled()) {
             throw new ImageServiceException(displayName() + " is not downloaded yet");
         }
@@ -131,12 +137,34 @@ public class SdCppImageGenerationService implements ImageGenerationService {
             boolean previews = preview != PreviewListener.NONE && !"none".equals(model.preview());
             List<String> args = arguments(model, seeded, promptFile, negativeFile, output,
                     previews ? previewFile : null, c -> path(store, c));
+            BufferedImage resizedInput = null;
+            BufferedImage resizedMask = null;
+            if (editing != null) {
+                Path input = work.resolve("input.png");
+                resizedInput = editing.mode() == ImageEditingRequest.Mode.INSTRUCTION ? editing.image()
+                        : net.talaatharb.imagegen.image.Images.resize(editing.image(), seeded.width(), seeded.height(), false);
+                ImageIO.write(resizedInput, "png", input.toFile());
+                Path mask = null;
+                if (editing.mode() == ImageEditingRequest.Mode.INPAINT) {
+                    mask = work.resolve("mask.png");
+                    resizedMask = net.talaatharb.imagegen.image.Images.resize(editing.mask(), seeded.width(), seeded.height(), true);
+                    ImageIO.write(resizedMask, "png", mask.toFile());
+                }
+                args.addAll(editArguments(editing.mode(), input, mask, editing.strength()));
+            }
             progress.update("Starting " + engine.describe(), 0);
             engine.run(args, output, previews ? previewFile : null, progress, preview);
             BufferedImage image = ImageIO.read(output.toFile());
             if (image == null) {
                 throw new ImageServiceException("stable-diffusion.cpp wrote an unreadable image");
             }
+            if (editing != null && (image.getWidth() != seeded.width() || image.getHeight() != seeded.height())) {
+                throw new ImageServiceException("Editing output does not match the requested dimensions");
+            }
+            if (editing != null && editing.mode() == ImageEditingRequest.Mode.INPAINT) {
+                image = net.talaatharb.imagegen.image.Images.blendInpainting(resizedInput, image, resizedMask);
+            }
+
             progress.update("Done", 1);
             return new GeneratedImage(image, id(), seeded, Duration.ofNanos(System.nanoTime() - started));
         } catch (IOException e) {
@@ -145,11 +173,24 @@ public class SdCppImageGenerationService implements ImageGenerationService {
             if (work != null) {
                 try {
                     SdCppEngine.deleteRecursively(work);
-                } catch (IOException ignored) {
-                    // Temporary files; the OS cleans them up eventually.
+                } catch (IOException e) {
+                    org.slf4j.LoggerFactory.getLogger(getClass()).warn("Could not remove temporary directory {}", work, e);
                 }
             }
         }
+    }
+
+    static List<String> editArguments(ImageEditingRequest.Mode mode, Path input, Path mask, float strength) {
+        List<String> args = new ArrayList<>();
+        args.addAll(List.of(mode == ImageEditingRequest.Mode.INSTRUCTION ? "--ref-image" : "--init-img",
+                input.toAbsolutePath().toString()));
+        if (mode != ImageEditingRequest.Mode.INSTRUCTION) {
+            args.addAll(List.of("--strength", Float.toString(strength)));
+        }
+        if (mode == ImageEditingRequest.Mode.INPAINT) {
+            args.addAll(List.of("--mask", mask.toAbsolutePath().toString()));
+        }
+        return args;
     }
 
     /** Builds the {@code sd-cli} arguments (without the executable). */

@@ -50,6 +50,48 @@ public class AppSettings {
         return properties.getProperty("mcp.model", "sd15-lcm");
     }
 
+    public synchronized String mcpEditingModel() {
+        return properties.getProperty("mcp.edit.model", "sd15");
+    }
+
+    public synchronized String mcpInstructionModel() {
+        return properties.getProperty("mcp.instruction.model", "flux2-klein-4b");
+    }
+
+    public synchronized String mcpEditingMode() {
+        return properties.getProperty("mcp.edit.mode", "img2img");
+    }
+
+    public synchronized float mcpEditingStrength() {
+        return Float.parseFloat(properties.getProperty("mcp.edit.strength", "0.75"));
+    }
+
+    public synchronized String mcpUpscalingModel() {
+        return properties.getProperty("mcp.upscale.model", "realesrgan-x4plus");
+    }
+
+    public synchronized int mcpUpscalingTileSize() {
+        return Integer.parseInt(properties.getProperty("mcp.upscale.tile", "128"));
+    }
+
+    public synchronized void setMcpTaskDefaults(String editModel, String instructionModel, String editMode,
+            float strength, String upscaleModel, int tile) {
+        if (editModel == null || editModel.isBlank() || instructionModel == null || instructionModel.isBlank()
+                || upscaleModel == null || upscaleModel.isBlank()
+                || !java.util.List.of("img2img", "inpaint", "instruction").contains(editMode)
+                || !Float.isFinite(strength) || strength <= 0 || strength > 1
+                || tile < 32 || tile > 256 || tile % 32 != 0) {
+            throw new IllegalArgumentException("Invalid editing/upscaling defaults");
+        }
+        properties.setProperty("mcp.edit.model", editModel);
+        properties.setProperty("mcp.instruction.model", instructionModel);
+        properties.setProperty("mcp.edit.mode", editMode);
+        properties.setProperty("mcp.edit.strength", Float.toString(strength));
+        properties.setProperty("mcp.upscale.model", upscaleModel);
+        properties.setProperty("mcp.upscale.tile", Integer.toString(tile));
+        save();
+    }
+
     public synchronized void setMcpConfiguration(int port, String model) {
         if (port < 1 || port > 65535 || model == null || model.isBlank()) {
             throw new IllegalArgumentException("Choose a model and a port between 1 and 65535");

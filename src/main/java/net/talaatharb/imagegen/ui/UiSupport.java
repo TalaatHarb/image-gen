@@ -75,6 +75,33 @@ final class UiSupport {
         return chooser;
     }
 
+    static BufferedImage openImage(Window owner, String title) {
+        FileChooser chooser = chooser(title);
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("PNG/JPEG image", "*.png", "*.jpg", "*.jpeg"));
+        File file = chooser.showOpenDialog(owner);
+        if (file == null) {
+            return null;
+        }
+        lastDirectory = file.getParentFile();
+        try {
+            return net.talaatharb.imagegen.image.ImageInputs.read(file.toPath());
+        } catch (IOException | IllegalArgumentException e) {
+            error("Could not open image", e.getMessage());
+            return null;
+        }
+    }
+
+    static <T extends ImageModelService> javafx.scene.control.ComboBox<T> modelCombo(java.util.List<T> services) {
+        var combo = new javafx.scene.control.ComboBox<T>();
+        combo.getItems().setAll(services);
+        combo.setMaxWidth(Double.MAX_VALUE);
+        combo.setConverter(new javafx.util.StringConverter<>() {
+            @Override public String toString(T service) { return service == null ? "" : service.displayName(); }
+            @Override public T fromString(String text) { throw new UnsupportedOperationException("Select a model"); }
+        });
+        return combo;
+    }
+
     static String size(long bytes) {
         if (bytes >= 1L << 30) {
             return String.format(Locale.ROOT, "%.1f GB", bytes / (double) (1L << 30));

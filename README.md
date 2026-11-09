@@ -7,7 +7,8 @@ A JavaFX desktop app for local, offline image generation with models that run on
 | Tab | Service interface | Implementations |
 | --- | --- | --- |
 | Image Generation | `ImageGenerationService` | `SdCppImageGenerationService` (stable-diffusion.cpp), `OnnxImageGenerationService` (ONNX Runtime) |
-| Image Editing *(planned)* | — | — |
+| Image Editing | `ImageEditingService` | `SdCppImageEditingService` (SD 1.5 img2img/inpainting, FLUX.2 Klein instruction editing) |
+| Upscaling | `ImageUpscalingService` | `SdCppUpscalingService` (Real-ESRGAN 4x) |
 
 The tab shows a live preview while sampling. Finished images can be saved as PNG, copied to the clipboard, or regenerated with the same seed, and earlier results stay in a history strip.
 
@@ -94,6 +95,8 @@ Connect an MCP client using its Streamable HTTP URL setting. Available tools:
 | --- | --- | --- |
 | `list_models` | None | Model IDs, installed status, supported sizes and generation defaults |
 | `generate_image` | Required `prompt`; optional `model`, `negative_prompt`, `width`, `height`, `steps`, `guidance_scale`, `seed` | Base64 PNG image content plus model, dimensions, elapsed time and the actual seed |
+| `edit_image` | Required base64 `image` and `prompt`; `mask` required for inpainting; optional `mode`, `model`, `strength` and generation settings | Edited PNG and generation metadata |
+| `upscale_image` | Required base64 `image`; optional `model`, `tile_size` | 4x PNG with dimensions, scale and elapsed time |
 
 Omitted generation settings use the chosen model's defaults; `seed` defaults to `-1`
 (random). Optional values may also be null, empty/whitespace, or `"default"` (case-insensitive).
@@ -102,6 +105,27 @@ unsupported negative prompts/guidance and extra arguments are ignored. Correctio
 in the result metadata's `warnings` array. A nonblank string `prompt` (up to 8192 characters)
 is still required, and transport, unavailable-model, busy and runtime errors remain errors.
 For example, call `generate_image` with `{"prompt":"a fox in a meadow","model":"default","seed":42}`.
+`list_models` also lists editing capabilities, upscalers and their configured defaults.
+
+Image tools accept **base64 PNG/JPEG bytes**, optionally as `data:image/png;base64,...`
+or `data:image/jpeg;base64,...`; they do not accept filesystem paths or fetch URLs.
+Each input file is limited to 8 MiB and 16 megapixels. Image requests may be up to 24 MiB;
+non-image requests remain limited to 64 KiB. Upscaled output is limited to 16 megapixels.
+Invalid input images and missing/mismatched inpainting masks are essential errors.
+
+The settings window (also available from the tray) includes these persistent defaults:
+
+| Setting | Initial value |
+| --- | --- |
+| Img2img / inpainting model | SD 1.5 (`sd15`) |
+| Instruction model | FLUX.2 Klein 4B (`flux2-klein-4b`) |
+| Editing mode | `img2img` |
+| Editing strength | `0.75` |
+| Upscaling model | Real-ESRGAN x4plus (`realesrgan-x4plus`) |
+| Upscaling tile size | `128` |
+
+For example, `edit_image` takes `{"image":"<base64 PNG>","prompt":"make this a watercolor","mode":"img2img"}`
+and `upscale_image` takes `{"image":"<base64 PNG>","model":"default"}`.
 Download the desired model in the app first; MCP will report a missing-model error rather
 than initiate a large model download. GPU mode applies to MCP generation too (a missing
 GPU executable may still be downloaded). UI and MCP requests share one worker; a busy
@@ -125,6 +149,37 @@ allow enough time for CPU inference, which can take minutes.
 | `imagegen.hf.endpoint` | `https://huggingface.co` | Hugging Face mirror |
 | `imagegen.integration` | `false` | Enables the model integration tests |
 
+## Editing and upscaling
+
+**Image Editing** loads an input PNG/JPEG, offers mode-compatible models, and lets you
+choose the prompt/instruction, output dimensions, steps, guidance, strength and seed.
+Img2img and inpainting resize the input to the chosen output dimensions (stretch).
+For inpainting, load a same-size mask: white edits, black preserves, gray blends.
+Alternatively, use **Draw mask...** to paint over the input image with an adjustable
+brush, eraser and Clear mask action. The red overlay marks the region to edit.
+Loaded masks can also be modified; **Use mask** applies changes and Cancel discards them.
+Drawing always produces a mask matching the original input dimensions. MCP still
+requires callers to supply the input image and mask for inpainting.
+Black-mask pixels are preserved after VAE decoding as well as during sampling.
+Instruction editing uses the original image as a FLUX.2 Klein reference; strength is not used.
+SD 1.5 and SD 1.5 + LCM share the already-downloaded generation checkpoints.
+
+**Upscaling** offers [Real-ESRGAN x4plus](https://github.com/xinntao/Real-ESRGAN)
+(general, ~64 MiB) and x4plus anime 6B (small, ~17 MiB), both BSD-3-Clause.
+These official `.pth` weights run directly through the installed sd.cpp executable
+in standalone upscale mode; no diffusion checkpoint or Python is needed.
+Upscaling is fixed at 4x; smaller tiles reduce memory use. Model files are cached
+under `~/.image-gen/models/upscalers`.
+
+Both tabs support Save PNG, Copy and Use as input, share the same cancellable worker
+with generation/MCP, and follow the GPU switch. UI downloads ask for confirmation;
+MCP requires the selected model to be installed first.
+
+Img2img, inpainting and Real-ESRGAN have been run on CPU, including through HTTP MCP.
+FLUX.2 Klein instruction editing is wired to sd.cpp's `--ref-image` and covered by
+argument/capability tests, but has **not** been run end-to-end here (multi-GB download).
+FLUX.1 Kontext and an ONNX upscaler remain future additions.
+
 ## Run
 
 ```
@@ -146,6 +201,8 @@ mvn verify                                                         # unit tests
 mvn test -Dtest=ModelsIntegrationTest -Dimagegen.integration=true  # real models
 mvn test -Dtest=GenerationTabIntegrationTest -Dimagegen.integration=true  # MCP + Generate in the real window
 mvn test -Dtest=TrayIntegrationTest -Dimagegen.integration=true  # native tray controls (run separately)
+mvn test -Dtest=ImageTasksIntegrationTest -Dimagegen.integration=true  # real editing/upscaling backends
+mvn test -Dtest=ImageTasksMcpIntegrationTest -Dimagegen.integration=true  # new tabs + HTTP tools (run separately)
 ```
 
 The integration tests download the models they need:
@@ -156,6 +213,10 @@ The integration tests download the models they need:
 They write the generated images to `target/integration-images`.
 The window test also exercises the MCP toggle, busy errors and cancellation, then generates
 with SD 1.5 + LCM over HTTP. That model must already be downloaded.
+The image-task tests download only SD 1.5 and Real-ESRGAN if missing, not FLUX.
+The HTTP test writes `mcp-edit-default.png`, `mcp-edit-inpaint.png`, and `mcp-upscaled.png`
+to `target/integration-images`. Run JavaFX window/tray integration classes separately,
+since a JavaFX toolkit can only be started once per JVM.
 
 ## Structure
 
@@ -170,20 +231,20 @@ net.talaatharb.imagegen
 ├── ImageGenApp / ImageGenLauncher / ApplicationTray / SingleInstance
 ├── config/                       AppModule (service list, model store), AppSettings (saved preferences)
 ├── service/                      ImageGenerationService + request/result/defaults records
-├── generation/sdcpp/             stable-diffusion.cpp: platform builds, engine process, output parser, model catalog
+├── generation/sdcpp/             stable-diffusion.cpp: generation/editing, Real-ESRGAN, engine, parser, catalog
 ├── generation/onnx/              ONNX Runtime pipeline: CLIP tokenizer, LCM/Euler-a schedulers, model catalog
 ├── image/                        tensor <-> image conversion, latent previews
 ├── model/                        Hugging Face downloader (resumable), model cache, ONNX helpers, DirectML runtime
 ├── mcp/                          localhost-only HTTP MCP tools, using the shared generation worker
-└── ui/                           main window, Image Generation tab, background task runner
+└── ui/                           generation/editing/upscaling tabs, settings, shared background worker
 ```
 
 To add a new image task, add a service interface in `service/`, an FXML tab plus a controller in `ui/`, and a `<Tab>` in `main.fxml`.
 
 ## Roadmap (future work)
 
-- [ ] **Image Editing tab.** img2img, inpainting and instruction editing. sd.cpp already supports `--init-img`, `--mask` and reference images (FLUX.2 [klein] and FLUX.1 Kontext), so most of the work is UI.
-- [ ] **Upscaling tab.** Real-ESRGAN is supported by sd.cpp (`--upscale-model`). It could also run as a small ONNX model.
+- [ ] **Editing improvements.** Support crop/fit preprocessing and add FLUX.1 Kontext models.
+- [ ] **More upscalers.** Add small ONNX upscalers, alternative scale factors and configurable output limits.
 - [ ] **Würstchen v2 / Stable Cascade (Stage B/C).** Not implemented:
   - stable-diffusion.cpp doesn't support the architecture.
   - There is no maintained ONNX export.
