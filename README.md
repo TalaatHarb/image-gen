@@ -52,9 +52,11 @@ Other components:
 | JavaFX | UI | GPL 2.0 with Classpath Exception |
 | Guice, Jackson | DI, JSON | Apache 2.0 |
 
-## No extra installs
+## Runtime requirements
 
-You only need Java 17+ and Maven. There is no Python, PyTorch, CUDA or separate runtime to install.
+Java 17+ and Maven are required. No Python or PyTorch is needed. The prebuilt Linux sd.cpp binaries require a
+compatible system C/C++ runtime; Vulkan also requires a working GPU driver and Vulkan loader. See the Linux
+instructions below if the prebuilt binary does not run.
 
 - **stable-diffusion.cpp backend.** The first time an sd.cpp model is used, the app downloads the matching prebuilt `sd-cli` release (~30 MB) from GitHub and runs it as a subprocess:
   - Windows x64: CPU (AVX2) or Vulkan
@@ -76,6 +78,33 @@ Turn on **GPU** in the status bar. The setting is saved in `~/.image-gen/setting
 - **sd.cpp models** switch to the Vulkan build of `sd-cli` (Windows and Linux), which works on NVIDIA, AMD and Intel GPUs without CUDA. It is downloaded the first time. On macOS, Metal is always used.
 - **ONNX models** use DirectML on Windows x64 (any DirectX 12 GPU). The DirectML build of ONNX Runtime (~15 MB) is downloaded the first time, and the app may need a restart.
 - With 4 GB of VRAM, prefer SDXS, SD 1.5 (+LCM) or SD-Turbo. The transformer models (PixArt, FLUX, Z-Image) need 6–8 GB or more, or run on the CPU with 16 GB+ of RAM.
+
+### Linux compatibility
+
+The pinned upstream CPU and Vulkan binaries are built on Ubuntu 26.04 and require GLIBC 2.43. Older Linux
+distributions (including Ubuntu 24.04) cannot run them. Build the **same pinned version** locally instead.
+From a checkout of this repository, on Debian/Ubuntu, install the build prerequisites and run:
+
+```sh
+sudo apt install git cmake build-essential
+bash scripts/build-linux-sdcpp.sh cpu
+```
+
+For GPU mode, also install a Vulkan driver for your GPU, the loader and build dependencies, then build Vulkan:
+
+```sh
+sudo apt install libvulkan1 libvulkan-dev glslc spirv-headers vulkan-tools
+vulkaninfo --summary
+bash scripts/build-linux-sdcpp.sh vulkan
+```
+
+Use the driver appropriate for your NVIDIA, AMD or Intel GPU; `vulkaninfo` must list the actual GPU, not just
+software rendering. Turn on **GPU** in the app for sd.cpp models. ONNX models remain on CPU on Linux.
+The builds need internet access and may take several minutes. They are installed separately under
+`~/.image-gen/models` and selected automatically ahead of downloaded builds. If you use `imagegen.models`,
+pass that same directory as the second script argument. `imagegen.sdcpp.path`, if set, takes precedence over
+both builds; a custom executable must itself support the intended device. The native build targets the machine
+on which it is compiled and should be rebuilt after moving the cache to another machine.
 
 ## Local MCP server (optional)
 

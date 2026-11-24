@@ -34,8 +34,8 @@ import net.talaatharb.imagegen.service.PreviewListener;
 
 /**
  * Runs the prebuilt stable-diffusion.cpp command line program ({@code sd-cli}). The release archive for the current
- * platform (about 17-30 MB) is downloaded once into the model cache, so nothing has to be installed; a custom build
- * can be used instead through {@value #PATH_PROPERTY}.
+ * platform is downloaded once into the model cache. On Linux, a locally built executable in the cache takes
+ * precedence over the prebuilt release; a custom build can also be used through {@value #PATH_PROPERTY}.
  */
 public class SdCppEngine {
     /** Path of a custom {@code sd-cli} executable (e.g. a CUDA or ROCm build). */
@@ -73,12 +73,25 @@ public class SdCppEngine {
         return store.directory("sd-cpp-" + SdCppPlatform.RELEASE + "-" + platform.variant());
     }
 
+    Path localExecutable(SdCppPlatform platform) {
+        return store.directory("sd-cpp-" + SdCppPlatform.RELEASE + "-" + platform.variant() + "-local")
+                .resolve(platform.executable());
+    }
+
     public Path executable() {
         Path custom = customExecutable();
         if (custom != null) {
             return custom;
         }
-        SdCppPlatform platform = platform();
+        return executable(platform());
+    }
+
+    private Path executable(SdCppPlatform platform) {
+        Path local = localExecutable(platform);
+        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("linux")
+                && Files.isRegularFile(local)) {
+            return local;
+        }
         return directory(platform).resolve(platform.executable());
     }
 
@@ -98,7 +111,7 @@ public class SdCppEngine {
             return Files.isRegularFile(custom);
         }
         return SdCppPlatform.current(gpuRequested.getAsBoolean())
-                .map(p -> Files.isRegularFile(directory(p).resolve(p.executable())))
+                .map(p -> Files.isRegularFile(executable(p)))
                 .orElse(false);
     }
 
@@ -229,8 +242,16 @@ public class SdCppEngine {
         int exit = process.exitValue();
         if (exit != 0 || !Files.isRegularFile(output)) {
             // sd-cli sometimes exits with 0 although it could not create the image, so the output file decides.
+            String summary = parser.failureSummary();
+            if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("linux")
+                    && (summary.contains("GLIBC_") || summary.contains("GLIBCXX_")
+                            || summary.contains("error while loading shared libraries"))) {
+                summary += "\nThe Linux prebuilt may be incompatible with this system or missing a library. "
+                        + "Build a compatible CPU or Vulkan executable with scripts/build-linux-sdcpp.sh; "
+                        + "see the Linux section of the README.";
+            }
             throw new ImageServiceException("stable-diffusion.cpp failed (exit code " + exit + "): "
-                    + parser.failureSummary());
+                    + summary);
         }
     }
 

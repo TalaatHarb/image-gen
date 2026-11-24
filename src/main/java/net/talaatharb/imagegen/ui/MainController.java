@@ -83,9 +83,8 @@ public class MainController {
         if (SdCppPlatform.hasSeparateGpuBuild() || GpuRuntime.isSupported()) {
             gpuCheck.setSelected(GpuRuntime.isRequested());
             gpuCheck.disableProperty().bind(runner.runningProperty());
-            gpuCheck.setTooltip(new Tooltip("Runs stable-diffusion.cpp models with its Vulkan build (any NVIDIA, AMD "
-                    + "or Intel GPU) and, on Windows, the ONNX Runtime model through DirectML. The GPU builds are "
-                    + "downloaded once (about 30 MB + 15 MB)."));
+            gpuCheck.setTooltip(new Tooltip("Runs stable-diffusion.cpp models with Vulkan (requires a working Vulkan "
+                    + "driver). ONNX models use DirectML on Windows and remain on CPU on Linux."));
         } else if (SdCppPlatform.current(true).map(SdCppPlatform::gpu).orElse(false)) {
             gpuCheck.setSelected(true);
             gpuCheck.setDisable(true);
