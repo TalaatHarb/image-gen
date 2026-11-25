@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
+import net.talaatharb.imagegen.service.ImageServiceException;
 
 /**
  * Shared ONNX Runtime environment; the Maven artifact bundles the native CPU runtime for every desktop OS and
@@ -65,6 +66,11 @@ public final class Onnx {
     public static OrtSession openAccelerated(Path model, OrtSession.SessionOptions.OptLevel level)
             throws OrtException {
         OrtEnvironment env = env();
+        if (GpuRuntime.isRequested() && GpuRuntime.isSupported() && !GpuRuntime.isActive()
+                && directMlOptions().containsKey("device_id")) {
+            throw new ImageServiceException("The selected DirectML GPU cannot be used because the DirectML runtime "
+                    + "is not active. Restart the application with GPU acceleration enabled.");
+        }
         if (GpuRuntime.isEnabled()) {
             try (OrtSession.SessionOptions options = new OrtSession.SessionOptions()) {
                 options.setOptimizationLevel(level);
@@ -77,6 +83,10 @@ public final class Onnx {
                 LOG.info("Opened {} on the GPU (DirectML)", model.getFileName());
                 return session;
             } catch (OrtException | RuntimeException e) {
+                if (directMlOptions().containsKey("device_id")) {
+                    throw new ImageServiceException("Could not open the selected DirectML GPU for "
+                            + model.getFileName() + ": " + e.getMessage(), e);
+                }
                 LOG.warn("GPU session for {} failed, using the CPU instead: {}", model.getFileName(), e.getMessage());
             }
         }
@@ -116,6 +126,9 @@ public final class Onnx {
      */
     static Map<String, String> directMlOptions() {
         String device = System.getProperty(GPU_DEVICE_PROPERTY);
+        if (device == null || device.isBlank()) {
+            device = GpuRuntime.directMlDevice();
+        }
         if (device != null && !device.isBlank()) {
             return Map.of("device_id", device.trim());
         }

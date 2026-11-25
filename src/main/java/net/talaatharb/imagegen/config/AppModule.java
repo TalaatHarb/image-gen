@@ -39,6 +39,7 @@ public class AppModule extends AbstractModule {
 
     @Override
     protected void configure() {
+        GpuRuntime.setDirectMlDevice(settings.directMlDevice());
         bind(ModelStore.class).toInstance(new ModelStore(modelsRoot));
         bind(AppSettings.class).toInstance(settings);
         bind(HuggingFaceDownloader.class).in(Singleton.class);
@@ -48,7 +49,7 @@ public class AppModule extends AbstractModule {
     @Provides
     @Singleton
     SdCppEngine sdCppEngine(ModelStore store, HuggingFaceDownloader downloader) {
-        return new SdCppEngine(store, downloader, GpuRuntime::isRequested);
+        return new SdCppEngine(store, downloader, GpuRuntime::isRequested, settings);
     }
 
     /** Text-to-image models in the order they are offered in the UI (fastest first). */

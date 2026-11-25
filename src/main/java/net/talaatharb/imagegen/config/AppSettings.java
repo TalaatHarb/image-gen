@@ -42,6 +42,31 @@ public class AppSettings {
         save();
     }
 
+    public synchronized String sdCppDevice() {
+        return properties.getProperty("gpu.sdcpp.device", "");
+    }
+
+    public synchronized String sdCppDeviceDescription() {
+        return properties.getProperty("gpu.sdcpp.description", "");
+    }
+
+    public synchronized String directMlDevice() {
+        return properties.getProperty("gpu.directml.device", "");
+    }
+
+    public synchronized void setGpuDevices(String device, String description, String directMl) {
+        if (device == null || description == null || directMl == null
+                || (!device.isEmpty() && (!device.matches("[A-Za-z0-9_]+") || description.isBlank()))
+                || (device.isEmpty() && !description.isEmpty())
+                || (!directMl.isEmpty() && !directMl.matches("[0-9]+"))) {
+            throw new IllegalArgumentException("Invalid GPU device selection");
+        }
+        properties.setProperty("gpu.sdcpp.device", device);
+        properties.setProperty("gpu.sdcpp.description", description);
+        properties.setProperty("gpu.directml.device", directMl);
+        save();
+    }
+
     public synchronized int mcpPort() {
         return Integer.parseInt(properties.getProperty("mcp.port", "8764"));
     }

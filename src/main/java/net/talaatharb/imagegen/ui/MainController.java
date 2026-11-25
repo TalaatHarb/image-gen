@@ -16,11 +16,13 @@ import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.Spinner;
+import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleButton;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.GridPane;
 import javafx.util.StringConverter;
 import net.talaatharb.imagegen.config.AppSettings;
+import net.talaatharb.imagegen.generation.sdcpp.SdCppEngine;
 import net.talaatharb.imagegen.generation.sdcpp.SdCppPlatform;
 import net.talaatharb.imagegen.mcp.ImageGenerationMcpServer;
 import net.talaatharb.imagegen.model.GpuRuntime;
@@ -35,6 +37,7 @@ public class MainController {
     private final TaskRunner runner;
     private final AppSettings settings;
     private final ModelStore store;
+    private final SdCppEngine sdCppEngine;
     private final List<ImageGenerationService> generationServices;
     private final ImageGenerationMcpServer mcpServer;
     private final List<net.talaatharb.imagegen.service.ImageEditingService> editingServices;
@@ -48,11 +51,12 @@ public class MainController {
     @FXML private ProgressBar statusProgress;
     @FXML private Button cancelButton;
     @FXML private CheckBox gpuCheck;
+    @FXML private Button gpuSettingsButton;
     @FXML private ToggleButton mcpToggle;
     @FXML private Button mcpSettingsButton;
 
     @Inject
-    public MainController(TaskRunner runner, AppSettings settings, ModelStore store,
+    public MainController(TaskRunner runner, AppSettings settings, ModelStore store, SdCppEngine sdCppEngine,
             List<ImageGenerationService> generationServices, ImageGenerationMcpServer mcpServer,
             com.google.inject.Provider<ImageEditingPane> editingPane,
             com.google.inject.Provider<ImageUpscalingPane> upscalingPane,
@@ -61,6 +65,7 @@ public class MainController {
         this.runner = runner;
         this.settings = settings;
         this.store = store;
+        this.sdCppEngine = sdCppEngine;
         this.generationServices = generationServices;
         this.mcpServer = mcpServer;
         this.editingPane = editingPane;
@@ -93,6 +98,7 @@ public class MainController {
             gpuCheck.setDisable(true);
             gpuCheck.setTooltip(new Tooltip("No prebuilt GPU runtime is available for this platform"));
         }
+        gpuSettingsButton.disableProperty().bind(runner.runningProperty().or(gpuCheck.selectedProperty().not()));
 
     }
 
@@ -196,6 +202,86 @@ public class MainController {
     @FXML
     private void onCancel() {
         runner.cancel();
+    }
+
+    @FXML
+    private void onGpuSettings() {
+        if (!sdCppEngine.isInstalled()) {
+            Alert confirm = new Alert(AlertType.CONFIRMATION,
+                    "The GPU build of stable-diffusion.cpp must be downloaded before listing its devices "
+                            + "(about 30 MB). Continue?", ButtonType.OK, ButtonType.CANCEL);
+            confirm.setHeaderText("Download GPU runtime");
+            if (confirm.showAndWait().filter(ButtonType.OK::equals).isEmpty()) {
+                return;
+            }
+        }
+        runner.submit("Listing GPU devices", progress -> {
+            sdCppEngine.install(progress);
+            progress.checkCancelled();
+            return sdCppEngine.listDevices();
+        }, this::showGpuSettings, null);
+    }
+
+    private void showGpuSettings(List<SdCppEngine.Device> devices) {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(gpuSettingsButton.getScene().getWindow());
+        dialog.setTitle("GPU settings");
+        dialog.setHeaderText("GPU selections apply to new tasks.");
+        if (devices.isEmpty()) {
+            dialog.setHeaderText("No sd.cpp GPU devices detected. Check the GPU driver and runtime.");
+        }
+        ComboBox<SdCppEngine.Device> device = new ComboBox<>();
+        SdCppEngine.Device automatic = new SdCppEngine.Device("", "Automatic");
+        device.getItems().add(automatic);
+        device.getItems().addAll(devices);
+        SdCppEngine.Device saved = new SdCppEngine.Device(settings.sdCppDevice(), settings.sdCppDeviceDescription());
+        if (!saved.name().isEmpty() && !devices.contains(saved)) {
+            device.getItems().add(saved);
+        }
+        device.setValue(saved.name().isEmpty() ? automatic : saved);
+        TextField directMl = new TextField(settings.directMlDevice());
+        directMl.setPromptText("Automatic");
+        directMl.setDisable(!GpuRuntime.isSupported() || !System.getProperty("imagegen.gpu.device", "").isBlank());
+        GridPane fields = new GridPane();
+        fields.setHgap(12);
+        fields.setVgap(12);
+        Label deviceLabel = new Label("sd.cpp GPU:");
+        deviceLabel.setLabelFor(device);
+        Label directMlLabel = new Label("DirectML adapter index:");
+        directMlLabel.setLabelFor(directMl);
+        fields.addRow(0, deviceLabel, device);
+        fields.addRow(1, directMlLabel, directMl);
+        Label help = new Label("DirectML uses separate DXGI adapter indexes, not the sd.cpp device number.\n"
+                + "Leave blank for the high-performance GPU. A system property can override this setting.");
+        fields.add(help, 0, 2, 2, 1);
+        dialog.getDialogPane().setContent(fields);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        javafx.scene.Node ok = dialog.getDialogPane().lookupButton(ButtonType.OK);
+        ok.addEventFilter(javafx.event.ActionEvent.ACTION, event -> {
+            String index = directMl.getText().trim();
+            try {
+                if (!index.isEmpty() && (!index.matches("[0-9]+") || Integer.parseInt(index) < 0)) {
+                    throw new IllegalArgumentException();
+                }
+                if (runner.isRunning()) {
+                    throw new IllegalArgumentException("Wait for the current task to finish.");
+                }
+                if (!device.getValue().name().isEmpty() && !devices.contains(device.getValue())) {
+                    throw new IllegalArgumentException("The saved sd.cpp GPU is unavailable. Select another device.");
+                }
+            } catch (IllegalArgumentException e) {
+                event.consume();
+                UiSupport.error("Invalid GPU settings", e.getMessage() == null
+                        ? "Enter a non-negative DirectML adapter index, or leave it blank." : e.getMessage());
+            }
+        });
+        dialog.showAndWait().filter(ButtonType.OK::equals).ifPresent(ignored -> {
+            SdCppEngine.Device selected = device.getValue();
+            String index = directMl.getText().trim();
+            settings.setGpuDevices(selected.name(), selected.name().isEmpty() ? "" : selected.description(), index);
+            GpuRuntime.setDirectMlDevice(index);
+            generationServices.forEach(ImageGenerationService::close);
+        });
     }
 
     private static <T extends net.talaatharb.imagegen.service.ImageModelService> void selectConfigured(

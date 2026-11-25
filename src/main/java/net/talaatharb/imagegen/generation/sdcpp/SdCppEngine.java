@@ -17,6 +17,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -26,6 +28,7 @@ import javax.imageio.ImageIO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import net.talaatharb.imagegen.config.AppSettings;
 import net.talaatharb.imagegen.model.HuggingFaceDownloader;
 import net.talaatharb.imagegen.model.ModelStore;
 import net.talaatharb.imagegen.model.ProgressListener;
@@ -46,15 +49,81 @@ public class SdCppEngine {
     private final ModelStore store;
     private final HuggingFaceDownloader downloader;
     private final BooleanSupplier gpuRequested;
+    private final AppSettings settings;
     private final Object runLock = new Object();
 
     /**
      * @param gpuRequested whether the GPU (Vulkan) build should be used; read on every run so the setting can change
      */
     public SdCppEngine(ModelStore store, HuggingFaceDownloader downloader, BooleanSupplier gpuRequested) {
+        this(store, downloader, gpuRequested, null);
+    }
+
+    public SdCppEngine(ModelStore store, HuggingFaceDownloader downloader, BooleanSupplier gpuRequested,
+            AppSettings settings) {
         this.store = store;
         this.downloader = downloader;
         this.gpuRequested = gpuRequested;
+        this.settings = settings;
+    }
+
+    public record Device(String name, String description) {
+        @Override public String toString() {
+            return name.isEmpty() ? description : description + " (" + name + ")";
+        }
+    }
+
+    /** Lists devices reported by the selected sd-cli build, not OS or DirectML adapter indexes. */
+    public List<Device> listDevices() {
+        Path exe = executable().toAbsolutePath();
+        if (!Files.isRegularFile(exe)) {
+            throw new ImageServiceException("stable-diffusion.cpp is not installed: " + exe);
+        }
+        ProcessBuilder builder = new ProcessBuilder(exe.toString(), "--list-devices").redirectErrorStream(true);
+        builder.directory(exe.getParent().toFile());
+        configureEnvironment(builder.environment(), exe.getParent());
+        Process process;
+        try {
+            process = builder.start();
+        } catch (IOException e) {
+            throw new ImageServiceException("Could not list GPU devices: " + e.getMessage(), e);
+        }
+        AtomicReference<String> output = new AtomicReference<>("");
+        AtomicReference<IOException> readError = new AtomicReference<>();
+        Thread reader = new Thread(() -> {
+            try (InputStream in = process.getInputStream()) {
+                output.set(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                readError.set(e);
+            }
+        }, "sd-cli-devices");
+        reader.setDaemon(true);
+        reader.start();
+        try {
+            if (!process.waitFor(20, TimeUnit.SECONDS)) {
+                kill(process);
+                throw new ImageServiceException("Listing GPU devices timed out");
+            }
+            reader.join(2000);
+            if (reader.isAlive() || readError.get() != null) {
+                throw new ImageServiceException("Could not read the GPU device list", readError.get());
+            }
+            if (process.exitValue() != 0) {
+                throw new ImageServiceException("Could not list GPU devices: " + output.get().trim());
+            }
+            return parseDevices(output.get());
+        } catch (InterruptedException e) {
+            kill(process);
+            Thread.currentThread().interrupt();
+            throw new CancellationException("Cancelled");
+        }
+    }
+
+    static List<Device> parseDevices(String output) {
+        return output.lines().map(line -> line.split("\t", 2))
+                .filter(parts -> parts.length == 2 && parts[0].matches("[A-Za-z0-9_]+")
+                        && !parts[0].equalsIgnoreCase("cpu") && !parts[1].isBlank())
+                .map(parts -> new Device(parts[0], parts[1].trim())).distinct().toList();
     }
 
     /** The build that matches the current GPU preference, if one is published for this platform. */
@@ -204,11 +273,17 @@ public class SdCppEngine {
         }
         List<String> command = new ArrayList<>();
         command.add(exe.toAbsolutePath().toString());
+        if (settings != null && (gpuRequested.getAsBoolean()
+                || SdCppPlatform.current(false).map(SdCppPlatform::gpu).orElse(false))
+                && !settings.sdCppDevice().isEmpty()) {
+            Device selected = new Device(settings.sdCppDevice(), settings.sdCppDeviceDescription());
+            command.addAll(deviceArguments(selected, listDevices()));
+        }
         command.addAll(arguments);
         LOG.info("Running {}", String.join(" ", command));
         ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
         builder.directory(output.toAbsolutePath().getParent().toFile());
-        addLibraryPath(builder.environment(), exe.toAbsolutePath().getParent());
+        configureEnvironment(builder.environment(), exe.toAbsolutePath().getParent());
 
         SdCppOutputParser parser = new SdCppOutputParser();
         Process process;
@@ -253,6 +328,14 @@ public class SdCppEngine {
             throw new ImageServiceException("stable-diffusion.cpp failed (exit code " + exit + "): "
                     + summary);
         }
+    }
+
+    static List<String> deviceArguments(Device selected, List<Device> available) {
+        if (!available.contains(selected)) {
+            throw new ImageServiceException("The selected GPU is no longer available: " + selected
+                    + ". Open GPU settings and select a device again.");
+        }
+        return List.of("--backend", selected.name());
     }
 
     private static void pump(InputStream stream, SdCppOutputParser parser, ProgressListener progress) {
@@ -313,6 +396,13 @@ public class SdCppEngine {
             process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private void configureEnvironment(Map<String, String> environment, Path dir) {
+        addLibraryPath(environment, dir);
+        if (gpuRequested.getAsBoolean()) {
+            WindowsVulkanDrivers.configure(environment);
         }
     }
 

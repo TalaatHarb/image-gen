@@ -32,6 +32,7 @@
             <Label fx:id="statusLabel" text="Ready"/>
             <Region HBox.hgrow="ALWAYS"/>
             <CheckBox fx:id="gpuCheck" text="GPU" onAction="#onGpuToggled"/>
+            <Button fx:id="gpuSettingsButton" text="GPU settings..." onAction="#onGpuSettings"/>
             <ToggleButton fx:id="mcpToggle" text="MCP" onAction="#onMcpToggled"/>
             <Button fx:id="mcpSettingsButton" text="MCP settings..." onAction="#onMcpSettings"/>
             <ProgressBar fx:id="statusProgress" prefWidth="260"/>

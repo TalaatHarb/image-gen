@@ -33,6 +33,7 @@ public final class GpuRuntime {
     private static volatile boolean nativeLoaded;
     private static volatile boolean active;
     private static volatile boolean enabled;
+    private static volatile String directMlDevice = "";
 
     private GpuRuntime() {
     }
@@ -118,6 +119,14 @@ public final class GpuRuntime {
 
     public static void setEnabled(boolean value) {
         enabled = value;
+    }
+
+    public static String directMlDevice() {
+        return directMlDevice;
+    }
+
+    public static void setDirectMlDevice(String device) {
+        directMlDevice = device;
     }
 
     /** Called once ONNX Runtime's native library has been loaded; the runtime can't be swapped afterwards. */

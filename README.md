@@ -79,6 +79,24 @@ Turn on **GPU** in the status bar. The setting is saved in `~/.image-gen/setting
 - **ONNX models** use DirectML on Windows x64 (any DirectX 12 GPU). The DirectML build of ONNX Runtime (~15 MB) is downloaded the first time, and the app may need a restart.
 - With 4 GB of VRAM, prefer SDXS, SD 1.5 (+LCM) or SD-Turbo. The transformer models (PixArt, FLUX, Z-Image) need 6–8 GB or more, or run on the CPU with 16 GB+ of RAM.
 
+With GPU enabled, **GPU settings...** lists the devices detected by the installed sd.cpp GPU build.
+Select the desired GPU by name, or keep Automatic for the backend's default. The selection applies to
+generation, editing, upscaling and MCP tasks. If the device list changes, select it again instead of
+running on a different GPU. Listing devices may first download the sd.cpp GPU build.
+
+The ONNX model uses a separate DirectML adapter index (DXGI enumeration order), which is **not**
+the Vulkan device number. Leave the DirectML field blank to prefer the high-performance adapter, or
+enter a known DXGI adapter index. The `imagegen.gpu.device` system property overrides this field.
+Custom sd.cpp executables must support `--list-devices` and `--backend` for device selection.
+
+On Windows x64, the app also checks active display adapters for missing Vulkan registration.
+If an installed Vulkan manifest uses the adapter's registered 64-bit OpenGL driver DLL, the app
+adds it to sd.cpp's driver search using `VK_ADD_DRIVER_FILES`. This happens automatically for
+device listing and generation, without administrator rights, registry changes or machine-specific
+configuration. Explicit Vulkan environment settings are respected. Restart the app after updating
+drivers; discovery is cached for the session. If driver files are missing or recovery is not
+possible, repair/reinstall the GPU driver.
+
 ### Linux compatibility
 
 The pinned upstream CPU and Vulkan binaries are built on Ubuntu 26.04 and require GLIBC 2.43. Older Linux
